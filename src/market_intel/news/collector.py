@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 from urllib.parse import quote_plus, urlencode
 
 import feedparser
@@ -41,17 +41,11 @@ def _now_utc() -> datetime:
 
 
 def _to_dt(value: Any) -> datetime:
-    """
-    Best-effort conversion for RSS/GDELT timestamps.
-    Falls back to now UTC.
-    """
+    """Best-effort conversion for RSS/GDELT timestamps. Falls back to now UTC."""
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
     if isinstance(value, str):
-        # Common formats:
-        #  - RFC822-ish from RSS (feedparser handles published_parsed)
-        #  - ISO8601
         for fmt in (
             "%Y-%m-%dT%H:%M:%S%z",
             "%Y-%m-%dT%H:%M:%S.%f%z",
@@ -73,10 +67,7 @@ def _clean_text(s: str) -> str:
 
 
 def collect_rss(urls: Iterable[str], source_name: str, max_items: int = 50) -> List[Article]:
-    """
-    Collect generic RSS feeds using feedparser.
-    Any parsing errors are logged and skipped.
-    """
+    """Collect generic RSS feeds using feedparser. Any parsing errors are logged and skipped."""
     out: List[Article] = []
     for url in urls:
         try:
@@ -92,7 +83,6 @@ def collect_rss(urls: Iterable[str], source_name: str, max_items: int = 50) -> L
             summary = _clean_text(getattr(e, "summary", "") or getattr(e, "description", "") or "")
             lang = getattr(parsed, "language", None) or "en"
 
-            # Prefer published_parsed if present
             pub = None
             if hasattr(e, "published_parsed") and e.published_parsed:
                 try:
@@ -119,19 +109,37 @@ def collect_rss(urls: Iterable[str], source_name: str, max_items: int = 50) -> L
     return out
 
 
-def collect_google_news_rss(queries: Iterable[str], hl: str = "en-IN", gl: str = "IN", ceid: str = "IN:en") -> List[Article]:
+def collect_google_news_rss(
+    queries: Optional[Sequence[str]] = None,
+    *,
+    query: Optional[str] = None,
+    hl: str = "en-IN",
+    gl: str = "IN",
+    ceid: str = "IN:en",
+    max_items: int = 50,
+) -> List[Article]:
     """
-    Google News RSS requires query encoding. We build the URL safely so spaces/OR don't break urllib.
+    Backward-compatible Google News RSS collector.
+
+    Supports BOTH call styles:
+      - collect_google_news_rss(query="NSE OR NIFTY ...", ...)
+      - collect_google_news_rss(queries=["...", "..."], ...)
+
+    Also safely URL-encodes spaces/operators to avoid InvalidURL.
     """
+    if queries is None:
+        queries = []
+    if query:
+        queries = list(queries) + [query]
+
     urls: List[str] = []
     for q in queries:
-        q_enc = quote_plus(q)  # handles spaces and operators safely
-        url = f"https://news.google.com/rss/search?{urlencode({'q': q_enc, 'hl': hl, 'gl': gl, 'ceid': ceid})}"
-        # NOTE: urlencode will not double-encode because q_enc is already safe for query value.
-        # Example final: ...?q=NSE%2BOR%2BNIFTY...
+        params = {"q": q, "hl": hl, "gl": gl, "ceid": ceid}
+        # quote_plus encodes spaces as '+', safe=":" keeps ceid like IN:en intact
+        url = "https://news.google.com/rss/search?" + urlencode(params, quote_via=quote_plus, safe=":")
         urls.append(url)
 
-    return collect_rss(urls, source_name="GoogleNewsRSS", max_items=50)
+    return collect_rss(urls, source_name="GoogleNewsRSS", max_items=max_items)
 
 
 class _GDELTNonJSON(RuntimeError):
@@ -150,10 +158,7 @@ def _is_json_response(resp: requests.Response) -> bool:
     reraise=True,
 )
 def _gdelt_get(params: Dict[str, Any], timeout: int = 20) -> Dict[str, Any]:
-    """
-    Fetch GDELT doc API safely. If GDELT returns HTML/empty body, raise _GDELTNonJSON
-    so tenacity retries. After retries, caller must handle and continue.
-    """
+    """Fetch GDELT doc API safely. Retries non-JSON/empty/HTML responses."""
     base = "https://api.gdeltproject.org/api/v2/doc/doc"
     headers = {
         "Accept": "application/json",
@@ -161,21 +166,17 @@ def _gdelt_get(params: Dict[str, Any], timeout: int = 20) -> Dict[str, Any]:
     }
     resp = requests.get(base, params=params, headers=headers, timeout=timeout)
 
-    # Handle non-200
     if resp.status_code != 200:
         body_preview = (resp.text or "")[:200].replace("\n", " ")
         raise _GDELTNonJSON(f"GDELT non-200 status={resp.status_code} body={body_preview}")
 
-    # Handle empty
     if not resp.text or not resp.text.strip():
         raise _GDELTNonJSON("GDELT empty response body")
 
-    # Handle content-type mismatch (often HTML errors)
     if not _is_json_response(resp):
         body_preview = (resp.text or "")[:200].replace("\n", " ")
         raise _GDELTNonJSON(f"GDELT non-JSON content-type={resp.headers.get('Content-Type')} body={body_preview}")
 
-    # JSON parse (may still fail if upstream sends invalid JSON)
     return resp.json()
 
 
@@ -189,10 +190,7 @@ def collect_gdelt(
 ) -> List[Article]:
     """
     Collect news from GDELT Doc 2.1 API.
-    IMPORTANT: GDELT can intermittently return non-JSON or rate-limit pages.
-    This function is designed to NEVER crash the pipeline:
-    - retries inside _gdelt_get
-    - if still failing, logs warning and returns [].
+    Never crashes pipeline: on failure returns [] with a warning.
     """
     params: Dict[str, Any] = {
         "query": query,
@@ -206,7 +204,6 @@ def collect_gdelt(
     try:
         data = _gdelt_get(params)
     except Exception as e:
-        # Do not kill run: skip GDELT and continue
         logger.warning("GDELT fetch failed (skipping): query=%s err=%s", query, e)
         return []
 
@@ -217,9 +214,8 @@ def collect_gdelt(
             title = _clean_text(str(a.get("title", "") or ""))
             url = str(a.get("url", "") or "")
             source = str(a.get("sourceCountry", "") or a.get("sourceCollection", "") or "GDELT")
-            summary = _clean_text(str(a.get("seendate", "") or ""))
+            summary = _clean_text(str(a.get("snippet", "") or a.get("seendate", "") or ""))
 
-            # GDELT often provides "seendate" like 20250107091500 (YYYYMMDDHHMMSS)
             pub_raw = a.get("seendate") or a.get("date") or a.get("publishedAt")
             pub_dt = _now_utc()
             if isinstance(pub_raw, str) and re.fullmatch(r"\d{14}", pub_raw):
