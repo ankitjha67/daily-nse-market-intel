@@ -142,7 +142,7 @@ def run_pipeline(cfg: Cfg) -> Path:
             max_records=int(cfg.get("news.gdelt.max_records", 50)),
         )
     if bool(cfg.get("news.rss.enabled", True)):
-        articles += collect_rss(list(cfg.get("news.rss.feeds", [])) or [], max_items=40)
+        articles += collect_rss(list(cfg.get("news.rss.feeds", [])) or [], source_name="RSS", max_items=40)
 
     articles = dedup_articles(articles)
     log.info("Collected %d articles (deduped)", len(articles))
