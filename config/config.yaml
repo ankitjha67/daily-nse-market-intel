@@ -30,7 +30,7 @@ news:
     ceid: "IN:en"
   gdelt:
     enabled: true
-    query: "NSE OR NIFTY OR Sensex OR RBI OR Indian stocks"
+    query: "(NSE OR NIFTY OR Sensex OR RBI OR Indian stocks)"
     max_records: 50
   rss:
     enabled: true
