@@ -1,0 +1,83 @@
+run:
+  timezone: "Asia/Kolkata"
+  lookback_hours: 72
+  out_dir: "artifacts"
+  max_symbols: 120
+  http_cache_name: ".cache/http_cache"
+  http_cache_backend: "sqlite"
+  http_cache_expire_seconds: 3600
+  state_db_path: ".cache/state.db"
+
+feature_flags:
+  non_compliant_scrape: false
+  enable_llm_sentiment: false
+
+universe:
+  symbol_master_path: "data/nse_symbol_master.csv"
+  baseline_symbols_path: "data/baseline_symbols.csv"
+  watchlist_path: "data/watchlist.txt"
+  manual_aliases_path: "data/manual_aliases.csv"
+  include_baseline: true
+  include_watchlist: true
+
+news:
+  max_articles: 150
+  google_news:
+    enabled: true
+    query: "NSE OR NIFTY OR Sensex OR RBI OR Indian stocks"
+    hl: "en-IN"
+    gl: "IN"
+    ceid: "IN:en"
+  gdelt:
+    enabled: true
+    query: "NSE OR NIFTY OR Sensex OR RBI OR Indian stocks"
+    max_records: 50
+  rss:
+    enabled: true
+    feeds:
+      - name: "Reuters Business"
+        url: "https://feeds.reuters.com/reuters/businessNews"
+      - name: "Moneycontrol Markets"
+        url: "https://www.moneycontrol.com/rss/marketreports.xml"
+      - name: "Economic Times Markets"
+        url: "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
+
+sentiment:
+  model: "vader"   # vader | llm
+  llm:
+    provider: "openai"
+    api_key_env: "OPENAI_API_KEY"
+    model: "gpt-4o-mini"
+
+market_data:
+  provider: "yfinance"
+  history_days: 550
+  interval: "1d"
+  max_workers: 6
+
+technicals:
+  sma_fast: 20
+  sma_slow: 50
+  rsi_period: 14
+
+scoring:
+  weights:
+    sentiment: 0.25
+    fundamentals: 0.40
+    quality: 0.20
+    technical: 0.15
+  thresholds:
+    strong_buy: 0.78
+    buy: 0.62
+    hold: 0.48
+    sell: 0.35
+
+email:
+  enabled: true
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  from_env: "GMAIL_USER"
+  app_password_env: "GMAIL_APP_PASSWORD"
+  to:
+    - "YOUR_EMAIL_HERE@example.com"
+  subject_prefix: "[Daily NSE Intel]"

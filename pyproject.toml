@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daily-nse-market-intel"
+version = "0.2.0"
+description = "Daily NSE Market Intelligence & Stock Recommendation system"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PyYAML>=6.0.1",
+  "requests>=2.32.0",
+  "requests-cache>=1.2.1",
+  "tenacity>=9.0.0",
+  "feedparser>=6.0.11",
+  "pandas>=2.2.2",
+  "numpy>=1.26.4",
+  "yfinance>=0.2.43",
+  "rapidfuzz>=3.9.6",
+  "spacy>=3.7.6",
+  "langdetect>=1.0.9",
+  "jinja2>=3.1.4",
+  "matplotlib>=3.9.2",
+  "reportlab>=4.2.2",
+  "vaderSentiment>=3.3.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3.2", "ruff>=0.6.9", "mypy>=1.11.2", "types-PyYAML>=6.0.12.20240917"]
+
+[project.scripts]
+market-intel = "market_intel.cli:main"
+
+[tool.ruff]
+line-length = 100
