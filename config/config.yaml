@@ -79,5 +79,5 @@ email:
   from_env: "GMAIL_USER"
   app_password_env: "GMAIL_APP_PASSWORD"
   to:
-    - "YOUR_EMAIL_HERE@example.com"
+    - "ankitjha67@gmail.com"
   subject_prefix: "[Daily NSE Intel]"
