@@ -9,27 +9,18 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    PageBreak,
-    Paragraph,
     SimpleDocTemplate,
+    Paragraph,
     Spacer,
     Table,
     TableStyle,
+    PageBreak,
+    KeepTogether,
 )
 
-# --------------------------------------------------------------------------------------
-# MARKDOWN BUILDER (email-friendly, log-friendly)
-# --------------------------------------------------------------------------------------
-
-
-def _fmt_num(x: Any, *, decimals: int = 2) -> str:
-    try:
-        v = float(x)
-    except Exception:
-        return str(x) if x is not None else "NA"
-    # Avoid ugly float artifacts (like 431.6499938964844)
-    return f"{v:,.{decimals}f}"
-
+# ----------------------------
+# Public API (used by pipeline)
+# ----------------------------
 
 def build_brief_markdown(
     *,
@@ -40,8 +31,9 @@ def build_brief_markdown(
     disclaimer: str,
 ) -> str:
     """
-    Produces a clean markdown-like plaintext body suitable for email and logs.
-    PDF rendering is handled separately by render_brief_pdf() using a layout engine.
+    Human-readable Markdown used for:
+      - email body (plain text / markdown)
+      - PDF generation (render_brief_pdf parses this markdown)
     """
     lines: List[str] = []
     lines.append(f"# Executive Brief — {run_date}")
@@ -51,24 +43,14 @@ def build_brief_markdown(
         lines.append("- No symbols selected today.")
     else:
         for r in top_rows:
-            symbol = str(r.get("symbol", "")).strip()
-            company = str(r.get("company", "")).strip()
-            rec = str(r.get("recommendation", "NA")).strip()
-            score = r.get("score", None)
-            conf = r.get("confidence", None)
-
-            price = _fmt_num(r.get("price", "NA"), decimals=2)
-            target = str(r.get("target_range", "NA"))
-            sent = r.get("sentiment", "NA")
-
-            why = str(r.get("why", "")).strip()
-
             lines.append(
-                f"- **{symbol}** ({company}) — **{rec}**, score={float(score):.2f}, conf={float(conf):.2f}"
-                if score is not None and conf is not None
-                else f"- **{symbol}** ({company}) — **{rec}**"
+                f"- **{r.get('symbol','')}** ({r.get('company','')}) — **{r.get('recommendation','')}**, "
+                f"score={float(r.get('score',0.0)):.2f}, conf={float(r.get('confidence',0.0)):.2f}"
             )
-            lines.append(f"  - Price={price}, Target={target}, Sentiment={sent}")
+            lines.append(
+                f"  - Price={_fmt_num(r.get('price'))}, TargetRange={r.get('target_range','NA')}, Sentiment={_fmt_num(r.get('sentiment'))}"
+            )
+            why = str(r.get("why", "")).strip()
             if why:
                 lines.append(f"  - Why: {why}")
 
@@ -83,384 +65,434 @@ def build_brief_markdown(
 
     lines.append("")
     lines.append("## Key News Drivers (sample)")
-    if not news_titles:
-        lines.append("- No news titles collected.")
-    else:
-        for t in news_titles[:10]:
-            lines.append(f"- {t}")
+    for t in (news_titles or [])[:10]:
+        lines.append(f"- {t}")
 
     lines.append("")
     lines.append("## Disclaimer")
-    lines.append(disclaimer.strip())
+    # Ensure disclaimer is not accidentally markdown-titled again
+    lines.append(_strip_md(disclaimer).strip())
     lines.append("")
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------------------
-# PDF RENDERER (executive-grade layout)
-# Parses the markdown we produce above into structured sections and renders a styled PDF.
-# --------------------------------------------------------------------------------------
-
-
-@dataclass
-class TopCall:
-    symbol: str
-    company: str
-    recommendation: str
-    score: Optional[float]
-    confidence: Optional[float]
-    price: str
-    target: str
-    sentiment: str
-    why: str
-
-
-def _safe_float(s: str) -> Optional[float]:
-    try:
-        return float(s)
-    except Exception:
-        return None
-
-
-_TOP_LINE_RE = re.compile(
-    r"^- \*\*(?P<symbol>[^*]+)\*\* \((?P<company>[^)]*)\) — \*\*(?P<rec>[^*]+)\*\*, score=(?P<score>[0-9.]+), conf=(?P<conf>[0-9.]+)\s*$"
-)
-_TOP_LINE_FALLBACK_RE = re.compile(
-    r"^- \*\*(?P<symbol>[^*]+)\*\* \((?P<company>[^)]*)\) — \*\*(?P<rec>[^*]+)\*\*\s*$"
-)
-_PRICE_LINE_RE = re.compile(
-    r"^\s{2}- Price=(?P<price>.*?), Target=(?P<target>.*?), Sentiment=(?P<sent>.*)\s*$"
-)
-_WHY_LINE_RE = re.compile(r"^\s{2}- Why:\s*(?P<why>.*)\s*$")
-
-
-def _parse_md_sections(md_text: str) -> Tuple[str, List[TopCall], List[Tuple[str, str]], List[str], str]:
-    """
-    Returns:
-      run_date_title, top_calls, sector_pairs, news_titles, disclaimer_text
-    """
-    lines = md_text.splitlines()
-    run_title = "Executive Brief"
-    top_calls: List[TopCall] = []
-    sector_pairs: List[Tuple[str, str]] = []
-    news: List[str] = []
-    disclaimer_lines: List[str] = []
-
-    section = None
-    i = 0
-
-    # Find title
-    for ln in lines:
-        if ln.startswith("# "):
-            run_title = ln[2:].strip()
-            break
-
-    while i < len(lines):
-        ln = lines[i].rstrip("\n")
-
-        if ln.startswith("## "):
-            hdr = ln[3:].strip().lower()
-            if hdr.startswith("top calls"):
-                section = "top"
-            elif hdr.startswith("sector / theme momentum"):
-                section = "sector"
-            elif hdr.startswith("key news drivers"):
-                section = "news"
-            elif hdr.startswith("disclaimer"):
-                section = "disclaimer"
-            else:
-                section = None
-            i += 1
-            continue
-
-        if section == "top":
-            m = _TOP_LINE_RE.match(ln) or _TOP_LINE_FALLBACK_RE.match(ln)
-            if m:
-                symbol = (m.group("symbol") or "").strip()
-                company = (m.group("company") or "").strip()
-                rec = (m.group("rec") or "").strip()
-                score = _safe_float(m.groupdict().get("score", "") or "")
-                conf = _safe_float(m.groupdict().get("conf", "") or "")
-
-                price = "NA"
-                target = "NA"
-                sent = "NA"
-                why = ""
-
-                # lookahead for price/why lines
-                if i + 1 < len(lines):
-                    pm = _PRICE_LINE_RE.match(lines[i + 1])
-                    if pm:
-                        price = (pm.group("price") or "NA").strip()
-                        target = (pm.group("target") or "NA").strip()
-                        sent = (pm.group("sent") or "NA").strip()
-                        i += 1
-
-                if i + 1 < len(lines):
-                    wm = _WHY_LINE_RE.match(lines[i + 1])
-                    if wm:
-                        why = (wm.group("why") or "").strip()
-                        i += 1
-
-                top_calls.append(
-                    TopCall(
-                        symbol=symbol,
-                        company=company,
-                        recommendation=rec,
-                        score=score,
-                        confidence=conf,
-                        price=price,
-                        target=target,
-                        sentiment=sent,
-                        why=why,
-                    )
-                )
-                i += 1
-                continue
-
-        if section == "sector":
-            # expects "- Something: +0.44"
-            if ln.startswith("- "):
-                txt = ln[2:].strip()
-                if ":" in txt:
-                    k, v = txt.split(":", 1)
-                    sector_pairs.append((k.strip(), v.strip()))
-            i += 1
-            continue
-
-        if section == "news":
-            if ln.startswith("- "):
-                news.append(ln[2:].strip())
-            i += 1
-            continue
-
-        if section == "disclaimer":
-            # keep all lines verbatim
-            if ln.strip() != "":
-                disclaimer_lines.append(ln)
-            else:
-                disclaimer_lines.append("")  # preserve paragraph breaks
-            i += 1
-            continue
-
-        i += 1
-
-    disclaimer_text = "\n".join(disclaimer_lines).strip()
-    return run_title, top_calls, sector_pairs, news, disclaimer_text
-
-
-def _shorten_why(why: str, max_chars: int = 140) -> str:
-    """
-    Converts verbose model diagnostics into something an exec can scan.
-    Keeps first 2 clauses if semicolon-separated; otherwise truncates.
-    """
-    if not why:
-        return ""
-    parts = [p.strip() for p in why.split(";") if p.strip()]
-    if len(parts) >= 2:
-        out = f"{parts[0]}; {parts[1]}"
-    else:
-        out = why.strip()
-    if len(out) > max_chars:
-        out = out[: max_chars - 1].rstrip() + "…"
-    return out
-
-
-def _footer(canvas, doc):
-    canvas.saveState()
-    w, h = A4
-    canvas.setFont("Helvetica", 8)
-    canvas.setFillColor(colors.grey)
-
-    # footer left: disclaimer reminder
-    canvas.drawString(2 * cm, 1.2 * cm, "Educational / research use only — NOT investment advice.")
-    # footer right: page number
-    canvas.drawRightString(w - 2 * cm, 1.2 * cm, f"Page {doc.page}")
-    canvas.restoreState()
-
-
 def render_brief_pdf(md_text: str, out_path: str) -> None:
     """
-    Executive-grade PDF rendering:
-    - Proper headings
-    - Top Calls table (wrapped cells)
-    - Clean bullet lists
-    - Dedicated Disclaimer page
-    - Page footer + page numbers
+    Executive-grade PDF renderer:
+      - Parses the markdown produced by build_brief_markdown()
+      - Renders tables + bullet lists + clean disclaimer page
     """
-    title, top_calls, sector_pairs, news_titles, disclaimer_text = _parse_md_sections(md_text)
+    parsed = _parse_brief_markdown(md_text)
 
     doc = SimpleDocTemplate(
         out_path,
         pagesize=A4,
-        leftMargin=2 * cm,
-        rightMargin=2 * cm,
-        topMargin=2 * cm,
-        bottomMargin=2 * cm,
-        title=title,
+        leftMargin=1.4 * cm,
+        rightMargin=1.4 * cm,
+        topMargin=1.4 * cm,
+        bottomMargin=1.4 * cm,
+        title="Executive Brief",
+        author="market-intel",
     )
 
     styles = getSampleStyleSheet()
-
-    title_style = ParagraphStyle(
-        "ExecTitle",
+    style_title = ParagraphStyle(
+        "EB_Title",
         parent=styles["Title"],
         fontName="Helvetica-Bold",
-        fontSize=18,
-        leading=22,
+        fontSize=16,
+        leading=18,
         spaceAfter=10,
     )
-
-    h2_style = ParagraphStyle(
-        "ExecH2",
+    style_subtitle = ParagraphStyle(
+        "EB_Subtitle",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=10,
+        leading=12,
+        textColor=colors.grey,
+        spaceAfter=14,
+    )
+    style_h = ParagraphStyle(
+        "EB_H",
         parent=styles["Heading2"],
         fontName="Helvetica-Bold",
         fontSize=12,
         leading=14,
         spaceBefore=10,
-        spaceAfter=6,
+        spaceAfter=8,
     )
-
-    body_style = ParagraphStyle(
-        "ExecBody",
-        parent=styles["BodyText"],
+    style_body = ParagraphStyle(
+        "EB_Body",
+        parent=styles["Normal"],
         fontName="Helvetica",
-        fontSize=9.5,
-        leading=12,
-        spaceAfter=4,
+        fontSize=9,
+        leading=11,
     )
-
-    small_style = ParagraphStyle(
-        "ExecSmall",
-        parent=styles["BodyText"],
+    style_small = ParagraphStyle(
+        "EB_Small",
+        parent=styles["Normal"],
         fontName="Helvetica",
         fontSize=8.5,
-        leading=11,
-        spaceAfter=3,
+        leading=10.5,
     )
 
     story: List[Any] = []
 
-    # Title
-    story.append(Paragraph(title, title_style))
-    story.append(Spacer(1, 6))
+    # Title block
+    story.append(Paragraph("Executive Brief", style_title))
+    story.append(Paragraph(f"Run date: {parsed.run_date or 'NA'}", style_subtitle))
 
     # Top Calls
-    story.append(Paragraph("Top Calls (data-driven signals, NOT advice)", h2_style))
-
-    if not top_calls:
-        story.append(Paragraph("No symbols selected today.", body_style))
+    story.append(Paragraph("Top Calls (data-driven signals, NOT advice)", style_h))
+    if not parsed.top_calls:
+        story.append(Paragraph("No symbols selected today.", style_body))
     else:
-        # Table: Symbol | Company | Signal | Score | Conf | Price | Target | Sent | Key Drivers
-        header = [
-            Paragraph("<b>Ticker</b>", small_style),
-            Paragraph("<b>Company</b>", small_style),
-            Paragraph("<b>Signal</b>", small_style),
-            Paragraph("<b>Score</b>", small_style),
-            Paragraph("<b>Conf</b>", small_style),
-            Paragraph("<b>Price</b>", small_style),
-            Paragraph("<b>Target Range</b>", small_style),
-            Paragraph("<b>Sent</b>", small_style),
-            Paragraph("<b>Key drivers</b>", small_style),
-        ]
-
-        rows: List[List[Any]] = [header]
-        for r in top_calls[:12]:  # keep exec view tight; rest can live in HTML report
-            score = f"{r.score:.2f}" if r.score is not None else "NA"
-            conf = f"{r.confidence:.2f}" if r.confidence is not None else "NA"
-
-            rows.append(
-                [
-                    Paragraph(f"<b>{r.symbol}</b>", small_style),
-                    Paragraph(r.company or "—", small_style),
-                    Paragraph(r.recommendation or "—", small_style),
-                    Paragraph(score, small_style),
-                    Paragraph(conf, small_style),
-                    Paragraph(str(r.price), small_style),
-                    Paragraph(str(r.target), small_style),
-                    Paragraph(str(r.sentiment), small_style),
-                    Paragraph(_shorten_why(r.why) or "—", small_style),
-                ]
-            )
-
-        # column widths tuned for A4 with 2cm margins
-        col_widths = [2.0 * cm, 4.0 * cm, 2.4 * cm, 1.2 * cm, 1.2 * cm, 2.0 * cm, 3.0 * cm, 1.2 * cm, 4.0 * cm]
-
-        tbl = Table(rows, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
-        tbl.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F0F3F6")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111111")),
-                    ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.HexColor("#C9D3DD")),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E0E6ED")),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ]
-            )
-        )
-        story.append(tbl)
+        story.append(_build_top_calls_table(parsed.top_calls, style_small))
 
     # Sector momentum
     story.append(Spacer(1, 10))
-    story.append(Paragraph("Sector / Theme Momentum (news sentiment)", h2_style))
+    story.append(Paragraph("Sector / Theme Momentum (news sentiment)", style_h))
+    sector_rows = [(k, v) for (k, v) in (parsed.sector_boom or []) if k and k.strip()]
+    sector_rows = sorted(sector_rows, key=lambda x: x[1], reverse=True)
 
-    if sector_pairs:
-        # keep top 6
-        sp = sector_pairs[:6]
-        sec_rows = [[Paragraph("<b>Sector</b>", small_style), Paragraph("<b>Sentiment</b>", small_style)]]
-        for k, v in sp:
-            sec_rows.append([Paragraph(k, small_style), Paragraph(v, small_style)])
-
-        sec_tbl = Table(sec_rows, colWidths=[10 * cm, 4 * cm], repeatRows=1, hAlign="LEFT")
-        sec_tbl.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F0F3F6")),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E0E6ED")),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ]
-            )
-        )
-        story.append(sec_tbl)
+    # Hide "Unknown only" to avoid exec confusion
+    if not sector_rows or (len(sector_rows) == 1 and sector_rows[0][0].strip().lower() == "unknown"):
+        story.append(Paragraph("Sector momentum unavailable or insufficiently classified today.", style_body))
     else:
-        story.append(Paragraph("Not enough data for sector aggregation today.", body_style))
+        story.append(_build_sector_table(sector_rows[:8], style_small))
 
     # News drivers
     story.append(Spacer(1, 10))
-    story.append(Paragraph("Key News Drivers (sample)", h2_style))
-    if not news_titles:
-        story.append(Paragraph("No news titles collected.", body_style))
+    story.append(Paragraph("Key News Drivers (sample)", style_h))
+    if not parsed.news_titles:
+        story.append(Paragraph("No news titles available today.", style_body))
     else:
-        for t in news_titles[:10]:
-            story.append(Paragraph(f"• {t}", body_style))
+        for t in parsed.news_titles[:12]:
+            story.append(Paragraph(f"• {_escape(t)}", style_body))
 
-    # Disclaimer page
+    # Disclaimer as last page
     story.append(PageBreak())
-    story.append(Paragraph("Disclaimer", h2_style))
-
-    if disclaimer_text:
-        # Preserve paragraphs: convert blank lines to <br/><br/>
-        esc = (
-            disclaimer_text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-        html = "<br/>".join(esc.splitlines())
-        story.append(Paragraph(html, body_style))
+    story.append(Paragraph("Disclaimer", style_h))
+    disclaimer_clean = _strip_md(parsed.disclaimer or "").strip()
+    if disclaimer_clean:
+        for para in _split_paragraphs(disclaimer_clean):
+            story.append(Paragraph(_escape(para), style_body))
+            story.append(Spacer(1, 6))
     else:
-        story.append(
-            Paragraph(
-                "DISCLAIMER: Educational / research use only. Not investment advice.",
-                body_style,
-            )
+        story.append(Paragraph("No disclaimer text provided.", style_body))
+
+    def _on_page(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        footer_left = "Educational / research use only — NOT investment advice."
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(doc_obj.leftMargin, 0.9 * cm, footer_left)
+        canvas.drawRightString(A4[0] - doc_obj.rightMargin, 0.9 * cm, f"Page {doc_obj.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+
+
+# ----------------------------
+# Internals
+# ----------------------------
+
+@dataclass
+class _TopCall:
+    ticker: str
+    company: str
+    signal: str
+    score: Optional[float]
+    conf: Optional[float]
+    price: str
+    target_range: str
+    sentiment: str
+    drivers: str
+
+
+@dataclass
+class _ParsedBrief:
+    run_date: str
+    top_calls: List[_TopCall]
+    sector_boom: List[Tuple[str, float]]
+    news_titles: List[str]
+    disclaimer: str
+
+
+def _fmt_num(x: Any) -> str:
+    if x is None:
+        return "NA"
+    try:
+        xf = float(x)
+        return f"{xf:.2f}"
+    except Exception:
+        s = str(x).strip()
+        return s if s else "NA"
+
+
+def _strip_md(s: str) -> str:
+    # remove common markdown tokens but keep meaning
+    s = re.sub(r"^\s*#+\s*", "", s, flags=re.M)  # headings like # Title
+    s = s.replace("**", "")
+    s = s.replace("__", "")
+    return s
+
+
+def _escape(s: str) -> str:
+    # ReportLab Paragraph supports a subset of HTML; escape the basics
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _split_paragraphs(s: str) -> List[str]:
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", s) if p.strip()]
+    return parts or [s.strip()] if s.strip() else []
+
+
+def _parse_brief_markdown(md: str) -> _ParsedBrief:
+    lines = md.splitlines()
+
+    run_date = ""
+    top_calls: List[_TopCall] = []
+    sector_boom: List[Tuple[str, float]] = []
+    news_titles: List[str] = []
+    disclaimer = ""
+
+    # run_date from first header
+    for ln in lines:
+        m = re.match(r"^\s*#\s*Executive Brief\s+—\s*(.+?)\s*$", ln.strip())
+        if m:
+            run_date = m.group(1).strip()
+            break
+
+    # Find sections
+    def find_idx(title: str) -> int:
+        for i, ln in enumerate(lines):
+            if ln.strip().lower() == title.strip().lower():
+                return i
+        return -1
+
+    i_top = find_idx("## Top Calls (data-driven signals, NOT advice)")
+    i_sector = find_idx("## Sector / Theme Momentum (news sentiment)")
+    i_news = find_idx("## Key News Drivers (sample)")
+    i_disc = find_idx("## Disclaimer")
+
+    # Parse top calls block
+    if i_top != -1:
+        end = min([x for x in [i_sector, i_news, i_disc, len(lines)] if x != -1])
+        block = lines[i_top + 1 : end]
+
+        cur: Dict[str, Any] = {}
+        for ln in block:
+            s = ln.rstrip()
+            if s.startswith("- **") and "—" in s:
+                # flush previous
+                if cur:
+                    top_calls.append(_topcall_from_cur(cur))
+                    cur = {}
+                # main line
+                # - **TICKER** (Company) — **Signal**, score=0.86, conf=0.76
+                mm = re.match(r"-\s*\*\*(.+?)\*\*\s*\((.*?)\)\s*—\s*\*\*(.+?)\*\*.*?score=([0-9.]+).*?conf=([0-9.]+)", s)
+                if mm:
+                    cur["ticker"] = mm.group(1).strip()
+                    cur["company"] = mm.group(2).strip()
+                    cur["signal"] = mm.group(3).strip()
+                    cur["score"] = float(mm.group(4))
+                    cur["conf"] = float(mm.group(5))
+                else:
+                    # fallback
+                    cur["raw"] = s
+
+            elif s.strip().startswith("- Price=") or s.strip().startswith("Price="):
+                #  - Price=..., TargetRange=..., Sentiment=...
+                cur["price_line"] = s.strip("- ").strip()
+            elif s.strip().startswith("- Why:") or s.strip().startswith("Why:"):
+                cur["why"] = s.strip("- ").strip().replace("Why:", "").strip()
+
+        if cur:
+            top_calls.append(_topcall_from_cur(cur))
+
+    # Parse sector block
+    if i_sector != -1:
+        end = min([x for x in [i_news, i_disc, len(lines)] if x != -1 and x > i_sector] or [len(lines)])
+        for ln in lines[i_sector + 1 : end]:
+            m = re.match(r"^\s*-\s*(.+?)\s*:\s*([+-]?\d+(?:\.\d+)?)\s*$", ln.strip())
+            if m:
+                k = m.group(1).strip()
+                v = float(m.group(2))
+                sector_boom.append((k, v))
+
+    # Parse news titles
+    if i_news != -1:
+        end = min([x for x in [i_disc, len(lines)] if x != -1 and x > i_news] or [len(lines)])
+        for ln in lines[i_news + 1 : end]:
+            if ln.strip().startswith("- "):
+                news_titles.append(ln.strip()[2:].strip())
+
+    # Parse disclaimer
+    if i_disc != -1:
+        disclaimer = "\n".join(lines[i_disc + 1 :]).strip()
+
+    return _ParsedBrief(
+        run_date=run_date,
+        top_calls=top_calls,
+        sector_boom=sector_boom,
+        news_titles=news_titles,
+        disclaimer=disclaimer,
+    )
+
+
+def _topcall_from_cur(cur: Dict[str, Any]) -> _TopCall:
+    ticker = str(cur.get("ticker", "")).strip()
+    company = str(cur.get("company", "")).strip()
+    signal = str(cur.get("signal", "")).strip()
+
+    score = cur.get("score")
+    conf = cur.get("conf")
+
+    price = "NA"
+    target_range = "NA"
+    sentiment = "NA"
+    price_line = str(cur.get("price_line", "")).strip()
+    if price_line:
+        # Price=..., TargetRange=..., Sentiment=...
+        # tolerate different key names
+        parts = [p.strip() for p in price_line.split(",")]
+        kv = {}
+        for p in parts:
+            if "=" in p:
+                k, v = p.split("=", 1)
+                kv[k.strip().lower()] = v.strip()
+        price = kv.get("price", "NA")
+        target_range = kv.get("targetrange", kv.get("target_range", kv.get("target", "NA")))
+        sentiment = kv.get("sentiment", "NA")
+
+        # round sentiment if numeric
+        sentiment = _fmt_num(sentiment)
+
+    drivers = str(cur.get("why", "")).strip()
+    drivers = _shorten_drivers(drivers)
+
+    return _TopCall(
+        ticker=ticker,
+        company=company,
+        signal=signal,
+        score=float(score) if isinstance(score, (int, float)) else None,
+        conf=float(conf) if isinstance(conf, (int, float)) else None,
+        price=_fmt_num(price),
+        target_range=str(target_range),
+        sentiment=str(sentiment),
+        drivers=drivers,
+    )
+
+
+def _shorten_drivers(s: str) -> str:
+    s = _strip_md(s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # common compressions
+    s = s.replace("Final score", "Score")
+    s = s.replace("confidence", "Conf")
+    # round any long floats to 2 decimals
+    def repl(m):
+        try:
+            return f"{float(m.group(0)):.2f}"
+        except Exception:
+            return m.group(0)
+    s = re.sub(r"[+-]?\d+\.\d{4,}", repl, s)
+    # keep it short for table cell
+    if len(s) > 140:
+        s = s[:137].rstrip() + "…"
+    return s
+
+
+def _build_top_calls_table(rows: List[_TopCall], style_small: ParagraphStyle) -> KeepTogether:
+    # Column widths tuned for A4 minus margins (~18.2 cm usable if 1.4cm margins both sides)
+    col_widths = [
+        2.2 * cm,  # Ticker
+        4.6 * cm,  # Company
+        2.2 * cm,  # Signal
+        1.2 * cm,  # Score
+        1.2 * cm,  # Conf
+        1.6 * cm,  # Price
+        2.8 * cm,  # Target Range
+        1.2 * cm,  # Sent
+        3.0 * cm,  # Key drivers
+    ]
+
+    data: List[List[Any]] = []
+    data.append(
+        [
+            Paragraph("<b>Ticker</b>", style_small),
+            Paragraph("<b>Company</b>", style_small),
+            Paragraph("<b>Signal</b>", style_small),
+            Paragraph("<b>Score</b>", style_small),
+            Paragraph("<b>Conf</b>", style_small),
+            Paragraph("<b>Price</b>", style_small),
+            Paragraph("<b>Target Range</b>", style_small),
+            Paragraph("<b>Sent</b>", style_small),
+            Paragraph("<b>Key drivers</b>", style_small),
+        ]
+    )
+
+    for r in rows[:12]:
+        data.append(
+            [
+                Paragraph(f"<b>{_escape(r.ticker)}</b>", style_small),
+                Paragraph(_escape(r.company), style_small),
+                Paragraph(_escape(r.signal), style_small),
+                Paragraph(_escape(f"{r.score:.2f}" if r.score is not None else "NA"), style_small),
+                Paragraph(_escape(f"{r.conf:.2f}" if r.conf is not None else "NA"), style_small),
+                Paragraph(_escape(r.price), style_small),
+                Paragraph(_escape(r.target_range), style_small),
+                Paragraph(_escape(r.sentiment), style_small),
+                Paragraph(_escape(r.drivers), style_small),
+            ]
         )
 
-    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF2F7")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                ("LINEBELOW", (0, 0), (-1, 0), 1, colors.HexColor("#CBD5E1")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (3, 1), (7, -1), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    return KeepTogether([tbl])
+
+
+def _build_sector_table(rows: List[Tuple[str, float]], style_small: ParagraphStyle) -> KeepTogether:
+    data: List[List[Any]] = []
+    data.append([Paragraph("<b>Sector</b>", style_small), Paragraph("<b>Sentiment</b>", style_small)])
+    for k, v in rows:
+        data.append([Paragraph(_escape(k), style_small), Paragraph(_escape(f"{v:+.2f}"), style_small)])
+
+    tbl = Table(data, colWidths=[10.5 * cm, 3.0 * cm], repeatRows=1)
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF2F7")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    return KeepTogether([tbl])
